@@ -29,62 +29,61 @@ class Tokenizer(ABC):
 class BPETokenizerParams:
     """All you need to specify a BPETokenizer."""
     vocab: dict[int, bytes]                 # index -> bytes
-    merges: dict[tuple[int, int], int]      # index1, index2 -> new_index
+    merges: list[tuple[bytes, bytes]]       # bytes1, bytes2
+    special_tokens: list[str] | None = None # list of special token strings
 
 
 class BPETokenizer(Tokenizer):
     """BPE tokenizer given a set of merges and a vocabulary."""
     def __init__(self, params: BPETokenizerParams):
         self.params = params
+        self.stoi = {token: idx for idx, token in self.params.vocab.items()}
 
-    def encode(self, string: str) -> list[int]:
-        # explictly map to int, redundent in python 3
-        indices = list(map(int, string.encode("utf-8")))
-        for pair, new_index in self.params.merges.items():
-            # go through all of the merges
-            indices = merge(indices, pair, new_index)
-        return indices
+    def encode(self, input_string: str) -> list[int]:
+        # 1. Handle Special Tokens
+        escaped = [re.escape(t) for t in self.params.special_tokens]
+        pattern = "|".join(escaped)
+        # Split chunk so special tokens become isolated boundaries
+        doc_list = re.split(pattern, input_string)
+
+        # 2. Regex Pre-tokenization
+        for doc in doc_list:
+            # pre-tokenize
+            matches = re.finditer(PRE_TOKEN_PAT, doc)
+            for m in matches:
+                m_str =  m.group()
+                assert m_str != EOT_STRING
+                token_bytes = m_str.encode("utf-8")
+                # Convert bytes object to a tuple of single-byte objects
+                # e.g. b'hi' -> (b'h', b'i')
+                tokens = tuple(bytes([b]) for b in token_bytes)
+
+                print(f"\n === encode, pre-tokenized tokens: {tokens}")
+                # merges
+                for pair in self.params.merges:
+                    byte1, byte2 = pair
+                    if byte1 in tokens and byte2 in tokens:
+                        # Reconstruct the token sequence with the merge
+                        new_tokens = []
+                        i = 0
+                        while i < len(tokens):
+                            if i < len(tokens) - 1 and tokens[i] == byte1 and tokens[i+1] == byte2:
+                                new_tokens.append(byte1 + byte2)
+                                i += 2
+                            else:
+                                new_tokens.append(tokens[i])
+                                i += 1
+                        tokens = tuple(new_tokens)
+                    else:
+                        continue
+                print(f"\n === encode, merged tokens: {tokens}")
+
 
     def decode(self, indices: list[int]) -> str:
         bytes_list = list(map(self.params.vocab.get, indices))
         string = b"".join(bytes_list).decode("utf-8")
         return string
 
-
-def merge(indices: list[int], pair: tuple[int, int], new_index: int) -> list[int]:
-    """Return `indices`, but with all instances of `pair` replaced with `new_index`."""
-    new_indices = []
-    i = 0
-    while i < len(indices):
-        if i + 1 < len(indices) and indices[i] == pair[0] and indices[i+1] == pair[1]:
-            # merged, this pair has a new index
-            new_indices.append(new_index)
-            # jump forward
-            i += 2
-        else:
-            # did not merge
-            new_indices.append(indices[i])
-            # check the next byte
-            i += 1
-    return new_indices
-
-
-def merge(indices: list[int], pair: tuple[int, int], new_index: int) -> list[int]:
-    """Return `indices`, but with all instances of `pair` replaced with `new_index`."""
-    new_indices = []
-    i = 0
-    while i < len(indices):
-        if i + 1 < len(indices) and indices[i] == pair[0] and indices[i+1] == pair[1]:
-            # merged, this pair has a new index
-            new_indices.append(new_index)
-            # jump forward
-            i += 2
-        else:
-            # did not merge
-            new_indices.append(indices[i])
-            # check the next byte
-            i += 1
-    return new_indices
 
 def find_chunk_boundaries(
     file: BinaryIO,
@@ -284,6 +283,8 @@ def train_bpe(
             token_freq = _merge_tokens(token_freq, best_pair)
             
     return vocab, merges_bytes
+
+
 
 if __name__ == '__main__':
     # input_path = "/Users/xsarah/assignment1-basics/data/TinyStoriesV2-GPT4-valid.txt"
