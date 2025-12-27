@@ -46,7 +46,7 @@ class RMSNorm(nn.Module):
         self.eps: float = eps
         self.device: torch.device | None = device
         self.dtype: torch.dtype | None = dtype
-        self.gain = nn.Parameter(
+        self.weight = nn.Parameter(
             torch.Tensor(np.ones(d_model))
         )
     
@@ -54,11 +54,11 @@ class RMSNorm(nn.Module):
         in_dtype = x.dtype
         x = x.to(torch.float32)
         b, n, _ = x.shape
-        rms = np.sqrt(
-            reduce(np.square(x), "b n d -> b n", "mean") + self.eps
+        rms = torch.sqrt(
+            reduce(torch.square(x), "b n d -> b n", "mean") + self.eps
         )
         rms = repeat(rms, "b n -> b n d", d=self.d_model)
-        gain = repeat(self.gain, "d -> b n d", b=b, n=n)
+        gain = repeat(self.weight, "d -> b n d", b=b, n=n)
         result = x / rms * gain
         return result.to(in_dtype)
 
@@ -240,20 +240,20 @@ class CausalMultiHeadAttention(nn.Module):
         self.num_heads = num_heads
         self.d_k = self.d_model // self.num_heads
         self.d_v = self.d_model // self.num_heads
-        self.w_q = Linear(
+        self.q_proj = Linear(
             in_features=self.d_model,
             out_features=self.num_heads * self.d_k, # d_model
         )
-        self.w_k = Linear(
+        self.k_proj = Linear(
             in_features=self.d_model,
             out_features=self.num_heads * self.d_k, # d_model
         )
-        self.w_v = Linear(
+        self.v_proj = Linear(
             in_features=self.d_model,
             out_features=self.num_heads * self.d_v, # d_model
 
         )
-        self.w_o = Linear(
+        self.output_proj = Linear(
             in_features=self.num_heads * self.d_v, # d_model
             out_features=self.d_model,
         )
@@ -265,9 +265,9 @@ class CausalMultiHeadAttention(nn.Module):
             token_positions: Int[torch.Tensor, "... seq_len"] = None
         ):
         seq_len = x.shape[-2]
-        q = self.w_q(x) # ... seq_len d_model, ... d_model (n d_k) -> ... seq_len (n d_k)
-        k = self.w_k(x) # ... seq_len d_model, ... d_model (n d_k) -> ... seq_len (n d_k)
-        v = self.w_v(x) # ... seq_len d_model, ... d_model (n d_v) -> ... seq_len (n d_v)
+        q = self.q_proj(x) # ... seq_len d_model, ... d_model (n d_k) -> ... seq_len (n d_k)
+        k = self.k_proj(x) # ... seq_len d_model, ... d_model (n d_k) -> ... seq_len (n d_k)
+        v = self.v_proj(x) # ... seq_len d_model, ... d_model (n d_v) -> ... seq_len (n d_v)
 
         q = rearrange(q, "... seq_len (n d_k) -> ... n seq_len d_k", n=self.num_heads)
         k = rearrange(k, "... seq_len (n d_k) -> ... n seq_len d_k", n=self.num_heads)
@@ -280,4 +280,44 @@ class CausalMultiHeadAttention(nn.Module):
 
         multi_head = scaled_dot_product_attention(q, k, v, mask=mask) # ... n seq_len d_v
         multi_head = rearrange(multi_head, "... n seq_len d_v -> ... seq_len (n d_v)")
-        return self.w_o(multi_head)
+        return self.output_proj(multi_head)
+
+
+class TransformerBlock(nn.Module):
+    def __init__(
+            self,
+            d_model: int,
+            num_heads: int,
+            d_ff: int):
+        """
+        Construct a pre-norm TranformerBlock.
+
+        :param self: Description
+        :param d_model: Dimensionality of the Transformer block inputs.
+        :type d_model: int
+        :param num_heads: Number of heads to use in multi-head self-attention.
+        :type num_heads: int
+        :param d_ff: Dimensionality of the position-wise feed-forward inner layer.
+        :type d_ff: int
+        """
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.ln1 = RMSNorm(d_model=self.d_model)
+        self.ln2 = RMSNorm(d_model=self.d_model)
+        self.attn = CausalMultiHeadAttention(
+            d_model=self.d_model,
+            num_heads=self.num_heads
+        )
+        self.ffn = SwiGLU(d_model=self.d_model, d_ff=self.d_ff)
+    
+    def forward(self,
+                x: Float[torch.Tensor, "batch_size seq_len d_model"],
+                rope: RoPE | None = None,
+                token_positions: Int[torch.Tensor, "... seq_len"] | None = None
+                ):
+        x = x + self.attn(self.ln1(x), rope, token_positions)
+        x = x + self.ffn(self.ln2(x))
+        return x
+
