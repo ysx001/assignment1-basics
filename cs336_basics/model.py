@@ -222,3 +222,62 @@ class RoPE(nn.Module):
 
         stacked_rot = rearrange([rot_even, rot_odd], "s ... -> ... s") # (2, ..., seq_len, d_k // 2) -> (..., seq_len, d_k // 2, 2)
         return rearrange(stacked_rot, "... d1 d2 -> ... (d1 d2)")
+
+
+class CausalMultiHeadAttention(nn.Module):
+    def __init__(self, d_model: int, num_heads: int):
+        """
+        Construct causal multi-head self-attention.
+
+        :param self: Description
+        :param d_model: Dimensionality of the Transformer block inputs.
+        :type d_model: int
+        :param num_heads: Number of heads to use in multi-head self-attention.
+        :type num_heads: int
+        """
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_k = self.d_model // self.num_heads
+        self.d_v = self.d_model // self.num_heads
+        self.w_q = Linear(
+            in_features=self.d_model,
+            out_features=self.num_heads * self.d_k, # d_model
+        )
+        self.w_k = Linear(
+            in_features=self.d_model,
+            out_features=self.num_heads * self.d_k, # d_model
+        )
+        self.w_v = Linear(
+            in_features=self.d_model,
+            out_features=self.num_heads * self.d_v, # d_model
+
+        )
+        self.w_o = Linear(
+            in_features=self.num_heads * self.d_v, # d_model
+            out_features=self.d_model,
+        )
+    
+    def forward(
+            self,
+            x: Float[torch.Tensor,  " ... seq_len d_model"],
+            rope: RoPE = None,
+            token_positions: Int[torch.Tensor, "... seq_len"] = None
+        ):
+        seq_len = x.shape[-2]
+        q = self.w_q(x) # ... seq_len d_model, ... d_model (n d_k) -> ... seq_len (n d_k)
+        k = self.w_k(x) # ... seq_len d_model, ... d_model (n d_k) -> ... seq_len (n d_k)
+        v = self.w_v(x) # ... seq_len d_model, ... d_model (n d_v) -> ... seq_len (n d_v)
+
+        q = rearrange(q, "... seq_len (n d_k) -> ... n seq_len d_k", n=self.num_heads)
+        k = rearrange(k, "... seq_len (n d_k) -> ... n seq_len d_k", n=self.num_heads)
+        v = rearrange(v, "... seq_len (n d_v) -> ... n seq_len d_v", n=self.num_heads)
+
+        mask = ~torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1)
+        if rope is not None and token_positions is not None:
+            q = rope.forward(q, token_positions=token_positions)
+            k = rope.forward(k, token_positions=token_positions)
+
+        multi_head = scaled_dot_product_attention(q, k, v, mask=mask) # ... n seq_len d_v
+        multi_head = rearrange(multi_head, "... n seq_len d_v -> ... seq_len (n d_v)")
+        return self.w_o(multi_head)
