@@ -107,7 +107,7 @@ class Embedding(nn.Module):
         self.embedding_dim: int = embedding_dim
         self.device: torch.device = device
         self.dtype: torch.dtype = dtype
-        self.embeddings = nn.Parameter(
+        self.weight = nn.Parameter(
             nn.init.trunc_normal_(
                 torch.empty(self.num_embeddings, self.embedding_dim),
                 mean=0,
@@ -117,11 +117,14 @@ class Embedding(nn.Module):
             )
         )
     
-    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+    def forward(
+            self,
+            token_ids: Float[torch.Tensor, "batch_size seq_len"]
+        ) -> Float[torch.Tensor, "batch_size seq_len d_model"]:
         """Apply the linear transformation of the input"""
         # token_ids has shape (batch_size, sequence_length)
         # embeddings had shape (vocab_size, d_model)
-        return self.embeddings[token_ids.long()]
+        return self.weight[token_ids.long()]
 
 
 class SwiGLU(nn.Module):
@@ -160,7 +163,7 @@ class RoPE(nn.Module):
     def __init__(
             self,
             theta: float,
-            d_k: int,
+            d_head: int,
             max_seq_len: int,
             device: torch.device | None = None,
         ):
@@ -169,8 +172,8 @@ class RoPE(nn.Module):
         
         :param theta: theta value for the RoPE
         :type theta: float
-        :param d_k: dimension of query and key vectors
-        :type d_k: int
+        :param d_head: dimension of query and key vectors
+        :type d_head: int
         :param max_seq_len: maximum sequence length that will be inputted
         :type max_seq_len: int
         :param device: device to store the buffer on
@@ -179,7 +182,7 @@ class RoPE(nn.Module):
         # 1. Create indices: [0, 2, 4, ..., d_k-2]
         # 2. Divide by d_k: [0/d, 2/d, ...]
         # This represents the "(2k-2)/d" exponent
-        exponent = torch.arange(0, d_k, 2) / d_k
+        exponent = torch.arange(0, d_head, 2) / d_head
         # 3. Exponentiate: 1.0 / (base ** exponent)
         # This creates the vector of theta_i values
         # x^y = exp(y ln(x)) for numerical stablity
@@ -288,7 +291,10 @@ class TransformerBlock(nn.Module):
             self,
             d_model: int,
             num_heads: int,
-            d_ff: int):
+            d_ff: int,
+            max_seq_len: int,
+            rope_theta: float,
+            ):
         """
         Construct a pre-norm TranformerBlock.
 
@@ -311,13 +317,83 @@ class TransformerBlock(nn.Module):
             num_heads=self.num_heads
         )
         self.ffn = SwiGLU(d_model=self.d_model, d_ff=self.d_ff)
+        d_head = d_model // num_heads
+        self.rope = RoPE(theta=rope_theta, d_head=d_head, max_seq_len=max_seq_len)
     
-    def forward(self,
-                x: Float[torch.Tensor, "batch_size seq_len d_model"],
-                rope: RoPE | None = None,
-                token_positions: Int[torch.Tensor, "... seq_len"] | None = None
-                ):
-        x = x + self.attn(self.ln1(x), rope, token_positions)
+    def forward(
+            self,
+            x: Float[torch.Tensor, "batch_size seq_len d_model"]
+        ) -> Float[torch.Tensor, "batch_size seq_len d_model"]:
+        seq_len = x.shape[-2]
+        token_positions: Int[torch.Tensor, "seq_len"] = torch.arange(seq_len) 
+        x = x + self.attn(self.ln1(x), self.rope, token_positions)
         x = x + self.ffn(self.ln2(x))
+        return x
+
+
+class TransformerLM(nn.Module):
+    def __init__(
+            self,
+            vocab_size: int,
+            context_length: int,
+            num_layers: int,
+            num_heads: int,
+            d_model: int,
+            d_ff: int,
+            rope_theta: float,
+    ):
+        """
+        Construct a Transformer Language Model.
+        
+        :param self: Description
+        :param vocab_size: Description
+        :type vocab_size: int
+        :param context_length: Description
+        :type context_length: int
+        :param num_layers: Description
+        :type num_layers: int
+        """
+        super().__init__()
+
+        # parameters
+        self.vocab_size = vocab_size
+        self.context_length = context_length
+        self.num_layers = num_layers
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+
+        # blocks
+        self.token_embeddings = Embedding(
+            num_embeddings=self.vocab_size,
+            embedding_dim=self.d_model,
+        )
+        self.layers = nn.ModuleList(
+            [
+                TransformerBlock(
+                    d_model=self.d_model,
+                    num_heads=self.num_heads,
+                    d_ff=self.d_ff,
+                    max_seq_len=self.context_length,
+                    rope_theta=rope_theta,
+                ) for _ in range(self.num_layers)
+            ]
+        )
+        self.ln_final = RMSNorm(d_model=self.d_model)
+        self.lm_head = Linear(
+            in_features=self.d_model,
+            out_features=self.vocab_size,
+        )
+        
+    def forward(
+            self,
+            x: Float[torch.Tensor, "batch_size seq_len"]
+        ) -> Float[torch.Tensor, "batch_size seq_len vocab_size"]:
+        x = self.token_embeddings(x)                    # batch_size seq_len -> batch_size seq_len d_model
+        for layer in self.layers:
+            x = layer(x)         # batch_size seq_len d_model
+        x = self.ln_final(x)
+        x = self.lm_head(x)                             # batch_size seq_len d_model -> batch_size seq_len vocab_size
+        # x = softmax(x, dim=-1)                        # batch_size seq_len vocab_size
         return x
 
