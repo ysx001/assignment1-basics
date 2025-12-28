@@ -391,9 +391,9 @@ class TransformerLM(nn.Module):
         ) -> Float[torch.Tensor, "batch_size seq_len vocab_size"]:
         x = self.token_embeddings(x)                    # batch_size seq_len -> batch_size seq_len d_model
         for layer in self.layers:
-            x = layer(x)         # batch_size seq_len d_model
+            x = layer(x)                                # batch_size seq_len d_model
         x = self.ln_final(x)
         x = self.lm_head(x)                             # batch_size seq_len d_model -> batch_size seq_len vocab_size
-        # x = softmax(x, dim=-1)                        # batch_size seq_len vocab_size
         return x
+
 
