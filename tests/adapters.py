@@ -8,7 +8,8 @@ import numpy.typing as npt
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
-from cs336_basics.bpe_tokenizer import train_bpe
+from cs336_basics.train_bpe import train_bpe
+from cs336_basics.tokenizer import BPETokenizer, BPETokenizerParams
 from cs336_basics.nn_utils import softmax, cross_entropy, lr_cosine_schedule, gradient_clipping
 from cs336_basics.model import Embedding, RMSNorm, Linear, RoPE, SwiGLU, CausalMultiHeadAttention, TransformerBlock, TransformerLM, silu, scaled_dot_product_attention
 from cs336_basics.optimizer import AdamW
@@ -606,7 +607,12 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
-    raise NotImplementedError
+    params = BPETokenizerParams(
+        vocab=vocab,
+        merges=merges,
+        special_tokens=special_tokens
+    )
+    return BPETokenizer(params)
 
 
 def run_train_bpe(
